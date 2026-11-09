@@ -193,19 +193,23 @@ async def test_partial_failure_retries_both_numbers(hass, valve):
     assert calls == [(OPEN, 40), (CLOSE, 60)]
 
 
+@pytest.mark.parametrize("room_target,expected", [(19.5, 19.5), (19.6, 19.5), (31, 28)])
 async def test_recompute_sends_mpc_demand_to_numbers_not_temperature_mapping(
-    hass, valve
+    hass, valve, room_target, expected
 ):
     coordinator, trv, calls, _ = valve
     _seed_entities(hass)
     hass.states.async_set(OPEN, "0")
     hass.states.async_set(CLOSE, "100")
     climate_calls = _register_fake_climate_set_temperature(hass)
+    coordinator.state.set_comfort_temperature(room_target)
+    coordinator.state.set_eco_temperature_offset(0)
     await coordinator.async_setup()
     assert coordinator.last_result is not None
     target = round(coordinator.last_result.demand_pct)
     assert calls[-2:] == [(OPEN, target), (CLOSE, 100 - target)]
-    assert climate_calls[-1].data["temperature"] == trv.max_target_temperature_c
+    assert climate_calls[-1].data["temperature"] == expected
+    assert coordinator.last_result.trv_targets == [expected]
     assert not coordinator.mpc.valve_curve_learners
     coordinator.async_unload()
 

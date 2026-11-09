@@ -245,8 +245,9 @@ it, and unloading cancels it. All commands respect the two numbers' ranges.
 Near the upper limit, the intermediate opening is capped (e.g. 95 → 100 → 92);
 a full 10-point closing stroke is physically impossible there and is logged.
 
-In MPC operation the climate target is held at the profile maximum while the
-paired limits determine the requested opening. Leave the TRV in heating mode.
+In MPC operation the climate target mirrors the effective room target (rounded
+to the device step and clamped to its limits), while the paired valve limits
+determine the requested opening. Leave the TRV in heating mode.
 During the existing outdoor-temperature fallback, both limits are released to
 100/0 and the TRV receives the absolute room target instead. Its sensor source
 is not changed. Do not run another controller against the same device.

@@ -5,6 +5,7 @@ import math
 import logging
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
@@ -914,9 +915,25 @@ class HeatingRoomCoordinator:
             self._outdoor_seen = True
         if actual_compute.valid:
             self._end_outdoor_fallback()
-            self.last_result = actual_compute.result
+            # Direct-valve devices use demand for the actuator; their climate
+            # setpoint mirrors the room, not the temperature-to-valve mapping.
+            self.last_result = replace(
+                actual_compute.result,
+                trv_targets=[
+                    clamp(
+                        round_to_step(actual_target, trv.target_temperature_step_c),
+                        trv.min_target_temperature_c,
+                        trv.max_target_temperature_c,
+                    )
+                    if trv.valve_opening_entity
+                    else target
+                    for trv, target in zip(
+                        self._trvs, actual_compute.result.trv_targets, strict=True
+                    )
+                ],
+            )
             await self._async_write_trv_targets(
-                actual_compute.result.trv_targets,
+                self.last_result.trv_targets,
                 forced=forced,
                 valve_demand_pct=actual_compute.result.demand_pct,
             )
@@ -1091,8 +1108,6 @@ class HeatingRoomCoordinator:
                         "Valve write failed for %s; retry next cycle", entity_id
                     )
                     continue
-                if valve_demand_pct is not None:
-                    target_temperature_c = trv.max_target_temperature_c
             current_target_c = self._current_trv_target(entity_id)
             if (
                 current_target_c is not None
