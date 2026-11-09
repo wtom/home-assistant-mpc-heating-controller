@@ -126,6 +126,7 @@
         "device_missing": "Dieses Gerät gibt es nicht mehr.",
         "unsupported_device": "Für dieses Gerät gibt es kein Geräteprofil.",
         "climate_missing": "Das Gerät hat keine eindeutige aktive Climate-Entity.",
+        "valve_control_missing": "Beide Number-Entities für Ventilöffnung und Ventilschließung dieses Geräts aktivieren.",
         "already_configured": "Ein Raum mit diesem Namen existiert bereits."
       }
     },

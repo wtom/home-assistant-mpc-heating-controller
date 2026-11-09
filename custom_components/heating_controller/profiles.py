@@ -31,6 +31,8 @@ DATA_PROFILES = f"{DOMAIN}_device_profiles"
 
 ROLE_CLIMATE = "climate"
 ROLE_VALVE_POSITION = "valve_position"
+ROLE_VALVE_OPENING = "valve_opening"
+ROLE_VALVE_CLOSING = "valve_closing"
 ROLE_HEAT_AVAILABLE = "heat_available"
 ROLE_ADAPTATION_STATUS = "adaptation_status"
 ROLE_MOUNTED_MODE = "mounted_mode"
@@ -109,6 +111,8 @@ PROFILE_SCHEMA = vol.Schema(
         vol.Required("entities"): {
             vol.Required(ROLE_CLIMATE): _ENTITY_SCHEMA,
             vol.Optional(ROLE_VALVE_POSITION): _ENTITY_SCHEMA,
+            vol.Optional(ROLE_VALVE_OPENING): _ENTITY_SCHEMA,
+            vol.Optional(ROLE_VALVE_CLOSING): _ENTITY_SCHEMA,
             vol.Optional(ROLE_HEAT_AVAILABLE): _ENTITY_SCHEMA,
             vol.Optional(ROLE_ADAPTATION_STATUS): _ENTITY_SCHEMA.extend(
                 {
@@ -198,6 +202,8 @@ class TrvBinding:
     target_temperature_step_c: float
     # The radiator settings stored for this TRV (emitter type, dimensions).
     emitter: Mapping[str, Any] = field(default_factory=dict)
+    valve_opening_entity: str | None = None
+    valve_closing_entity: str | None = None
     valve_position_entity: str | None = None
     heat_available_entity: str | None = None
     adaptation_status_entity: str | None = None
@@ -213,6 +219,8 @@ class TrvBinding:
             for entity_id in (
                 self.climate_entity,
                 self.valve_position_entity,
+                self.valve_opening_entity,
+                self.valve_closing_entity,
                 self.heat_available_entity,
                 self.adaptation_status_entity,
                 self.mounted_mode_entity,
@@ -364,6 +372,16 @@ def resolve_trv(
             f"matching profile {profile.name}",
         )
 
+    if (
+        ROLE_VALVE_OPENING in profile.entities or ROLE_VALVE_CLOSING in profile.entities
+    ) and not all(
+        role in entity_ids for role in (ROLE_VALVE_OPENING, ROLE_VALVE_CLOSING)
+    ):
+        raise TrvResolveError(
+            "valve_control_missing",
+            f"{_device_label(device)} needs enabled opening and closing number entities",
+        )
+
     return TrvBinding(
         climate_entity=entity_ids[ROLE_CLIMATE],
         min_target_temperature_c=profile.min_target_temperature_c,
@@ -371,6 +389,8 @@ def resolve_trv(
         target_temperature_step_c=profile.target_temperature_step_c,
         emitter={key: value for key, value in trv.items() if key != CONF_TRV_DEVICE_ID},
         valve_position_entity=entity_ids.get(ROLE_VALVE_POSITION),
+        valve_opening_entity=entity_ids.get(ROLE_VALVE_OPENING),
+        valve_closing_entity=entity_ids.get(ROLE_VALVE_CLOSING),
         heat_available_entity=entity_ids.get(ROLE_HEAT_AVAILABLE),
         adaptation_status_entity=entity_ids.get(ROLE_ADAPTATION_STATUS),
         adaptation_busy=(

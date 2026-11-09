@@ -26,7 +26,11 @@ ALL_Z2M_PROPERTIES = (
 def test_every_shipped_profile_is_valid() -> None:
     profiles = {profile.key: profile for profile in load_profiles()}
 
-    assert set(profiles) == {"danfoss_ally_zha", "danfoss_ally_zigbee2mqtt"}
+    assert set(profiles) == {
+        "danfoss_ally_zha",
+        "danfoss_ally_zigbee2mqtt",
+        "sonoff_trvzb_zigbee2mqtt",
+    }
     z2m = profiles["danfoss_ally_zigbee2mqtt"]
     assert z2m.model_ids == {"014G2461"}
     assert z2m.max_target_temperature_c == 35.0

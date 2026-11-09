@@ -126,6 +126,7 @@
         "device_missing": "This device no longer exists.",
         "unsupported_device": "No device profile covers this device.",
         "climate_missing": "The device has no single enabled climate entity.",
+        "valve_control_missing": "Enable both valve opening and closing number entities for this device.",
         "already_configured": "A room with this name already exists."
       }
     },

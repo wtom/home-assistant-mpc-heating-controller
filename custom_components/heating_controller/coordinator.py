@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -22,6 +24,7 @@ from homeassistant.core import (
     State,
     callback,
 )
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import (
     async_call_later,
@@ -336,6 +339,10 @@ class HeatingRoomCoordinator:
         self.last_result: RoomMpcResult | None = None
         # Target writes per TRV since setup: every write wakes the TRV.
         self.trv_setpoint_writes: dict[str, int] = {}
+        self._trv_write_lock = asyncio.Lock()
+        self._valve_commands: dict[str, tuple[int, float]] = {}
+        self._valve_pending: dict[str, tuple[int, Callable[[], None]]] = {}
+        self._unloaded = False
         self._written_targets: dict[str, tuple[float, float]] = {}
         self._trv_switched_at: dict[str, float] = {}
         self._adaptation_since: dict[str, float] = {}
@@ -486,6 +493,10 @@ class HeatingRoomCoordinator:
         await self._async_recompute()
 
     def async_unload(self) -> None:
+        self._unloaded = True
+        for _, cancel in self._valve_pending.values():
+            cancel()
+        self._valve_pending.clear()
         for unsub in self._unsub:
             unsub()
         self._unsub = []
@@ -905,7 +916,9 @@ class HeatingRoomCoordinator:
             self._end_outdoor_fallback()
             self.last_result = actual_compute.result
             await self._async_write_trv_targets(
-                actual_compute.result.trv_targets, forced=forced
+                actual_compute.result.trv_targets,
+                forced=forced,
+                valve_demand_pct=actual_compute.result.demand_pct,
             )
         elif self.mpc.outdoor_temperature_missing and self._outdoor_fallback_due():
             await self._async_apply_outdoor_fallback(actual_target, forced)
@@ -1034,7 +1047,23 @@ class HeatingRoomCoordinator:
         return self.outdoor_fallback_since_ts is not None
 
     async def _async_write_trv_targets(
-        self, trv_targets: list[float], forced: bool = False
+        self,
+        trv_targets: list[float],
+        forced: bool = False,
+        valve_demand_pct: float | None = None,
+    ) -> None:
+        # State events can arrive while a blocking number service is in flight.
+        async with self._trv_write_lock:
+            if not self._unloaded:
+                await self._async_write_trv_targets_locked(
+                    trv_targets, forced, valve_demand_pct
+                )
+
+    async def _async_write_trv_targets_locked(
+        self,
+        trv_targets: list[float],
+        forced: bool,
+        valve_demand_pct: float | None,
     ) -> None:
         for trv, target_temperature_c in zip(self._trvs, trv_targets, strict=True):
             entity_id = trv.climate_entity
@@ -1048,6 +1077,22 @@ class HeatingRoomCoordinator:
             now_ts = time.time()
             if not forced and self._adaptation_running(trv, now_ts):
                 continue
+            if trv.valve_opening_entity:
+                try:
+                    # No MPC demand means the existing absolute-temperature
+                    # fallback: release both limits for the TRV's own regulator.
+                    await self._async_set_valve(
+                        trv,
+                        100 if valve_demand_pct is None else valve_demand_pct,
+                        allow_bump=valve_demand_pct is not None,
+                    )
+                except HomeAssistantError:
+                    _LOGGER.exception(
+                        "Valve write failed for %s; retry next cycle", entity_id
+                    )
+                    continue
+                if valve_demand_pct is not None:
+                    target_temperature_c = trv.max_target_temperature_c
             current_target_c = self._current_trv_target(entity_id)
             if (
                 current_target_c is not None
@@ -1061,6 +1106,7 @@ class HeatingRoomCoordinator:
             ) != (target_temperature_c <= min_target_c)
             if (
                 switches
+                and not trv.valve_opening_entity
                 and not forced
                 and now_ts - self._trv_switched_at.get(entity_id, 0.0)
                 < TRV_SWITCH_MIN_INTERVAL_S
@@ -1070,7 +1116,7 @@ class HeatingRoomCoordinator:
                 "climate",
                 "set_temperature",
                 {"entity_id": entity_id, "temperature": target_temperature_c},
-                blocking=False,
+                blocking=bool(trv.valve_opening_entity),
             )
             self.trv_setpoint_writes[entity_id] = (
                 self.trv_setpoint_writes.get(entity_id, 0) + 1
@@ -1078,6 +1124,115 @@ class HeatingRoomCoordinator:
             self._written_targets[entity_id] = (target_temperature_c, now_ts)
             if switches:
                 self._trv_switched_at[entity_id] = now_ts
+
+    async def _async_set_valve(
+        self, trv: TrvBinding, percent: float, *, allow_bump: bool = True
+    ) -> None:
+        """TRVZB commands, called with _trv_write_lock held.
+
+        Small closes use +10 pp, wait 5 s, then close to the latest target.
+        Already pending targets are not postponed by repeated controller ticks.
+        """
+        entity_id = trv.climate_entity
+        opening = self.hass.states.get(trv.valve_opening_entity)
+        closing = self.hass.states.get(trv.valve_closing_entity)
+        if any(
+            s is None or s.state in (STATE_UNKNOWN, STATE_UNAVAILABLE)
+            for s in (opening, closing)
+        ):
+            raise HomeAssistantError(f"Valve numbers unavailable for {entity_id}")
+        low = max(
+            0,
+            float(opening.attributes.get("min", 0)),
+            100 - float(closing.attributes.get("max", 100)),
+        )
+        high = min(
+            100,
+            float(opening.attributes.get("max", 100)),
+            100 - float(closing.attributes.get("min", 0)),
+        )
+        if not math.isfinite(percent) or low > high:
+            raise HomeAssistantError(f"Invalid valve target/range for {entity_id}")
+        target = int(clamp(round(percent), math.ceil(low), math.floor(high)))
+        pending = self._valve_pending.get(entity_id)
+        if pending is not None and pending[0] == target and allow_bump:
+            return
+        if pending is not None:
+            pending[1]()
+            self._valve_pending.pop(entity_id, None)
+        written = self._valve_commands.get(entity_id)
+        current = None
+        if written is not None and time.time() - written[1] < TARGET_WRITE_SETTLE_S:
+            current = written[0]
+        else:
+            open_value = self._float_from_state(opening)
+            close_value = self._float_from_state(closing)
+            if (
+                open_value is not None
+                and close_value is not None
+                and abs(open_value + close_value - 100) < 0.1
+            ):
+                current = open_value
+        if current == target:
+            return
+        if (
+            allow_bump
+            and pending is None
+            and current is not None
+            and 0 < current - target < 10
+        ):
+            bump = int(min(high, current + 10))
+            if bump - target < 10:
+                _LOGGER.warning(
+                    "%s: upper valve limit prevents a 10 pp closing stroke", entity_id
+                )
+            if bump > current:
+                try:
+                    await self._async_write_valve_pair(trv, bump)
+                except HomeAssistantError:
+                    # Do not leave a partially applied bump as the last write.
+                    await self._async_write_valve_pair(trv, target)
+                    return
+                if self._unloaded:
+                    return
+
+                async def finish(_now: Any) -> None:
+                    async with self._trv_write_lock:
+                        # Identity check also rejects a timer already dispatched
+                        # before cancellation, or before an unload/reload.
+                        if (
+                            self._unloaded
+                            or self._valve_pending.get(entity_id) is not scheduled
+                        ):
+                            return
+                        self._valve_pending.pop(entity_id, None)
+                        try:
+                            await self._async_set_valve(trv, target, allow_bump=False)
+                        except HomeAssistantError:
+                            _LOGGER.exception(
+                                "Delayed valve write failed for %s; retry next cycle",
+                                entity_id,
+                            )
+
+                scheduled = (target, async_call_later(self.hass, 5, finish))
+                self._valve_pending[entity_id] = scheduled
+                return
+        await self._async_write_valve_pair(trv, target)
+
+    async def _async_write_valve_pair(self, trv: TrvBinding, percent: int) -> None:
+        # Invalidate before either write: a partial failure must retry BOTH.
+        self._valve_commands.pop(trv.climate_entity, None)
+        for entity_id, value in (
+            (trv.valve_opening_entity, percent),
+            (trv.valve_closing_entity, 100 - percent),
+        ):
+            await self.hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": entity_id, "value": value},
+                blocking=True,
+            )
+        self._valve_commands[trv.climate_entity] = (percent, time.time())
 
     def _current_trv_target(self, entity_id: str) -> float | None:
         """The TRV's target, or the one just written while its echo settles."""

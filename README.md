@@ -224,8 +224,39 @@ target temperature range and step:
 
 | Device | Integration | Entities used |
 |---|---|---|
+| SONOFF TRVZB | Zigbee2MQTT | climate, required `valve_opening_degree` and `valve_closing_degree` numbers |
 | Danfoss Ally (014G2461) | Zigbee2MQTT | climate, `pi_heating_demand` (valve opening), `heat_available`, `adaptation_run_status`, `mounted_mode_active` |
 | Danfoss Ally (eTRV0100, eTRV0101, eTRV0103) | ZHA | the same; not yet tested on a real device |
+
+### SONOFF TRVZB direct valve control (fork)
+
+The MPC already produces a percentage (`demand_pct`). This profile sends that
+percentage directly to `number.*valve_opening_degree` and its complement
+(`100 - percent`) to `number.*valve_closing_degree`, on the **same device**.
+Both numbers must be enabled and unambiguous. Entity names can be changed;
+matching uses Zigbee2MQTT's stable unique IDs, not room-name guessing. The
+TRV-ZBT is a different model and is not matched by this profile.
+
+For a closing correction smaller than 10 percentage points, the actuator first
+opens 10 points further and writes the requested target after 5 seconds:
+**20 → 30 → 17**. Larger closes and opening commands are written directly.
+Repeated requests do not postpone the final write; a changed target replaces
+it, and unloading cancels it. All commands respect the two numbers' ranges.
+Near the upper limit, the intermediate opening is capped (e.g. 95 → 100 → 92);
+a full 10-point closing stroke is physically impossible there and is logged.
+
+In MPC operation the climate target is held at the profile maximum while the
+paired limits determine the requested opening. Leave the TRV in heating mode.
+During the existing outdoor-temperature fallback, both limits are released to
+100/0 and the TRV receives the absolute room target instead. Its sensor source
+is not changed. Do not run another controller against the same device.
+
+The numbers are **commands, not measured valve feedback**. They are not fed
+into the position sensor or the setpoint-to-valve learner. As for existing
+TRVs without position feedback, the model estimates heat from demand; actual
+flow, opening dead zones and room comfort still need validation on the house.
+No heating-curve logic was changed; configuring automatic flow control is not
+required for this actuator path.
 
 Only devices with a profile can be picked. For another model please
 [open an issue](https://github.com/DerOetzi/home-assistant-mpc-heating-controller/issues)

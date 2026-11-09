@@ -1,0 +1,24 @@
+# Limits are commands, NOT measured valve positions. Resolve on this device,
+# using stable Zigbee2MQTT unique IDs even when HA entities are renamed.
+name: SONOFF TRVZB (Zigbee2MQTT, direct valve)
+match:
+  integration: mqtt
+  manufacturer: SONOFF
+  models:
+    - TRVZB
+  model_ids:
+    - TRVZB
+target_temperature:
+  min: 4
+  max: 35
+  step: 0.5
+entities:
+  climate:
+    domain: climate
+    unique_id_suffix: _climate_zigbee2mqtt
+  valve_opening:
+    domain: number
+    unique_id_suffix: _valve_opening_degree_zigbee2mqtt
+  valve_closing:
+    domain: number
+    unique_id_suffix: _valve_closing_degree_zigbee2mqtt
